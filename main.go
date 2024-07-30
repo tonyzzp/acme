@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -27,6 +28,18 @@ type JWK struct {
 	Y   string `json:"y"`
 }
 
+func (jwk *JWK) key() *ecdsa.PrivateKey {
+	pk := &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{
+			Curve: elliptic.P256(),
+			X:     base64ToBigInt(jwk.X),
+			Y:     base64ToBigInt(jwk.Y),
+		},
+		D: base64ToBigInt(jwk.D),
+	}
+	return pk
+}
+
 type AcmeDirectory struct {
 	KeyChange   string
 	NewAccount  string
@@ -41,9 +54,10 @@ type AcmeDirectory struct {
 	}
 }
 
-type NewAccountProtected struct {
+type Protected struct {
 	Alg   string `json:"alg"`
-	Jwk   JWK    `json:"jwk"`
+	Kid   string `json:"kid,omitempty"`
+	Jwk   *JWK   `json:"jwk,omitempty"`
 	Nonce string `json:"nonce"`
 	Url   string `json:"url"`
 }
@@ -53,10 +67,62 @@ type NewAccountPayload struct {
 	Contact              []string `json:"contact"`
 }
 
-type NewAccountReq struct {
+type Req struct {
 	Protected string `json:"protected"`
 	Payload   string `json:"payload"`
 	Signature string `json:"signature"`
+}
+
+type OrderIdentify struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type NewOrderPayload struct {
+	Identifiers []OrderIdentify `json:"identifiers"`
+	NotBefore   string          `json:"notBefore"`
+	NotAfter    string          `json:"notAfter"`
+}
+
+type AcmeAccount struct {
+	Kid       string
+	Key       JWK
+	Contact   []string
+	InitialIp string
+	CreatedAt string
+	Status    string
+}
+
+type Order struct {
+	Status         string
+	Expires        string
+	Identifiers    []OrderIdentify
+	Authorizations []string
+	Finalize       string
+}
+
+type Challenge struct {
+	Type      string
+	Url       string
+	Status    string
+	Token     string
+	Validated string `json:"validated"`
+	Error     struct {
+		Type   string
+		Detail string
+		Status int
+	}
+}
+
+type OrderInfo struct {
+	Identifier OrderIdentify
+	Status     string
+	Expires    string
+	Challenges []Challenge
+}
+
+func isSuccess(code int) bool {
+	return code >= 200 && code < 300
 }
 
 func dumpJson(data any) {
@@ -71,6 +137,7 @@ func dumpJson(data any) {
 func base64Json(data any) string {
 	bs, e := json.Marshal(data)
 	if e != nil {
+		log.Println("base64Json", data)
 		log.Println(e)
 		os.Exit(-1)
 	}
@@ -110,7 +177,7 @@ func genJwk() *JWK {
 
 		kid := sha256.Sum256([]byte(time.Now().String()))
 
-		jwk := &JWK{
+		jwk = &JWK{
 			Kty: "EC",
 			D:   base64.RawURLEncoding.EncodeToString(d),
 			Crv: "P-256",
@@ -131,6 +198,7 @@ func sign(pk *ecdsa.PrivateKey, data string) string {
 	sum := sha256.Sum256([]byte(data))
 	r, s, e := ecdsa.Sign(rand.Reader, pk, sum[:])
 	if e != nil {
+		log.Println("sign")
 		log.Println(e)
 		os.Exit(-1)
 	}
@@ -161,23 +229,15 @@ func newNonce(director *AcmeDirectory) string {
 	return res.Header()["Replay-Nonce"][0]
 }
 
-func newAccount(directory *AcmeDirectory, jwk *JWK) {
-
-	pk := &ecdsa.PrivateKey{
-		PublicKey: ecdsa.PublicKey{
-			Curve: elliptic.P256(),
-			X:     base64ToBigInt(jwk.X),
-			Y:     base64ToBigInt(jwk.Y),
-		},
-		D: base64ToBigInt(jwk.D),
-	}
+func newAccount(directory *AcmeDirectory, jwk *JWK) *AcmeAccount {
+	log.Println("------------------newAccount")
+	pk := jwk.key()
 	nonce := newNonce(directory)
 
-	protected := NewAccountProtected{
+	protected := Protected{
 		Alg: jwk.Alg,
-		// Jwk: json.RawMessage(fmt.Sprintf(`{"crv":"%s","kty":"%s","x":"%s","y":"%s"}`, jwk.Crv, jwk.Kty, jwk.X, jwk.Y)),
-		// Jwk:   json.RawMessage(jwkEncode(&pk.PublicKey)),
-		Jwk: JWK{
+		Jwk: &JWK{
+			Kid: jwk.Kid,
 			Kty: jwk.Kty,
 			Crv: jwk.Crv,
 			X:   jwk.X,
@@ -196,35 +256,147 @@ func newAccount(directory *AcmeDirectory, jwk *JWK) {
 	log.Println("payload")
 	dumpJson(payload)
 
-	req := NewAccountReq{
+	req := Req{
 		Protected: base64Json(protected),
 		Payload:   base64Json(payload),
 	}
-	// req.Signature = sign(pk, req.Protected+"."+req.Payload)
-	// bs := sha256.Sum256([]byte(req.Protected + "." + req.Payload))
-	// bs2, e := jwsSign(pk, crypto.SHA256, bs[:])
-	// if e != nil {
-	// 	fmt.Println(e)
-	// 	os.Exit(-1)
-	// }
-	// req.Signature = base64.RawURLEncoding.EncodeToString(bs2[:])
 	req.Signature = sign(pk, req.Protected+"."+req.Payload)
+	log.Println("req")
+	dumpJson(req)
+
+	rtn := &AcmeAccount{}
+	r := resty.New().R()
+	r.Method = http.MethodPost
+	r.SetBody(req)
+	r.SetHeader("Content-Type", "application/jose+json")
+	r.SetResult(rtn)
+	res, e := r.Post(directory.NewAccount)
+	if e != nil || res.StatusCode() != 200 {
+		log.Println(e)
+		log.Println(res.Status())
+		log.Println(res.Header())
+		log.Println(string(res.Body()))
+		os.Exit(-1)
+	} else {
+		rtn.Kid = res.Header()["Location"][0]
+	}
+	return rtn
+}
+
+func newOrder(directory *AcmeDirectory, jwk *JWK, account *AcmeAccount) *Order {
+	log.Println("----------------------------newOrder")
+	pk := jwk.key()
+	nonce := newNonce(directory)
+
+	protected := Protected{
+		Alg:   jwk.Alg,
+		Kid:   account.Kid,
+		Nonce: nonce,
+		Url:   directory.NewOrder,
+	}
+	log.Println("protected")
+	dumpJson(protected)
+
+	payload := NewOrderPayload{
+		Identifiers: []OrderIdentify{
+			{
+				Type:  "dns",
+				Value: "test.izzp.me",
+			},
+		},
+	}
+
+	req := Req{
+		Protected: base64Json(protected),
+		Payload:   base64Json(payload),
+	}
+	req.Signature = sign(pk, req.Protected+"."+req.Payload)
+	log.Println("req")
+	dumpJson(req)
+
+	rtn := &Order{}
+	r := resty.New().R()
+	r.Method = http.MethodPost
+	r.SetHeader("Content-Type", "application/jose+json")
+	r.SetBody(req)
+	r.SetResult(rtn)
+	res, e := r.Post(directory.NewOrder)
+	if e != nil || !isSuccess(res.StatusCode()) {
+		log.Println(e)
+		log.Println(res.Status())
+		log.Println(string(res.Body()))
+		os.Exit(-1)
+	}
+	return rtn
+}
+
+func getOrderInfo(url string) *OrderInfo {
+	log.Println("------------------getOrderInfo")
+	rtn := &OrderInfo{}
+	r := resty.New().R()
+	r.SetResult(rtn)
+	res, e := r.Get(url)
+	if e != nil || !isSuccess(res.StatusCode()) {
+		log.Println(e)
+		log.Println(res.Header())
+		log.Println(res.Header())
+		log.Println(string(res.Body()))
+		os.Exit(-1)
+	}
+	return rtn
+}
+
+func checkChallenge(url string) *Challenge {
+	log.Println("------------------checkChallenge")
+	rtn := &Challenge{}
+	r := resty.New().R()
+	r.SetResult(rtn)
+	res, e := r.Get(url)
+	if e != nil {
+		log.Println(e)
+		log.Println(string(res.Body()))
+	}
+	return rtn
+}
+
+func submitChallenge(directory *AcmeDirectory, challenge Challenge, jwk *JWK, account *AcmeAccount) {
+	log.Println("----------------------------submitChallenge")
+	pk := jwk.key()
+	nonce := newNonce(directory)
+
+	protected := Protected{
+		Alg:   jwk.Alg,
+		Kid:   account.Kid,
+		Nonce: nonce,
+		Url:   challenge.Url,
+	}
+	log.Println("protected")
+	dumpJson(protected)
+
+	req := Req{
+		Protected: base64Json(protected),
+		Payload:   base64Json(map[string]any{}),
+	}
+	req.Signature = sign(pk, req.Protected+"."+req.Payload)
+
 	log.Println("req")
 	dumpJson(req)
 
 	r := resty.New().R()
 	r.Method = http.MethodPost
-	r.SetBody(req)
 	r.SetHeader("Content-Type", "application/jose+json")
-	res, e := r.Post(directory.NewAccount)
+	r.SetBody(req)
+	res, e := r.Post(challenge.Url)
 	log.Println(e)
-	log.Println(res.StatusCode(), res.Status())
-	log.Println(string(res.Body()))
+	if res != nil {
+		log.Println(res.Status())
+		log.Println(string(res.Body()))
+	}
 }
 
 func main() {
 	jwk := genJwk()
-	f, e := os.OpenFile("log.log", os.O_CREATE, os.ModePerm)
+	f, e := os.OpenFile("log.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if e != nil {
 		println(e)
 		os.Exit(-1)
@@ -237,5 +409,46 @@ func main() {
 	log.Println("directory")
 	dumpJson(directory)
 
-	newAccount(directory, jwk)
+	account := newAccount(directory, jwk)
+	log.Println("account")
+	dumpJson(account)
+
+	order := newOrder(directory, jwk, account)
+	log.Println("order")
+	dumpJson(order)
+
+	orderInfo := getOrderInfo(order.Authorizations[0])
+	log.Println("orderInfo")
+	dumpJson(orderInfo)
+
+	var challenge *Challenge
+	for _, v := range orderInfo.Challenges {
+		if v.Type == "dns-01" {
+			challenge = &v
+			break
+		}
+	}
+	log.Println("challenge")
+	dumpJson(challenge)
+
+	challenge = checkChallenge(challenge.Url)
+	log.Println("check challenge")
+	dumpJson(challenge)
+
+	if challenge.Status == "pending" {
+		log.Println("token", challenge.Token)
+		log.Println("press y after dns setted")
+		ok := ""
+		fmt.Scanf("%s\n", &ok)
+		log.Println("ok", ok)
+		if ok != "y" {
+			os.Exit(-1)
+		}
+	}
+
+	challenge = checkChallenge(challenge.Url)
+	log.Println("check challenge")
+	dumpJson(challenge)
+
+	submitChallenge(directory, *challenge, jwk, account)
 }
