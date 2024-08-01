@@ -1,18 +1,17 @@
 package acme
 
 import (
+	"crypto/ecdsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"log"
 	"math/big"
 	"os"
 )
 
-func isSuccess(code int) bool {
-	return code >= 200 && code < 300
-}
-
-func DumpJson(data any) {
+func dumpJson(data any) {
 	bs, e := json.MarshalIndent(data, "", "    ")
 	if e != nil {
 		log.Println(e)
@@ -48,4 +47,26 @@ func base64ToBigInt(s string) *big.Int {
 	}
 	rtn.SetBytes(bs)
 	return rtn
+}
+
+func writeJson(file string, data any) error {
+	bs, e := json.MarshalIndent(data, "", "    ")
+	if e != nil {
+		return e
+	}
+	e = os.WriteFile(file, bs, os.ModePerm)
+	return e
+}
+
+func convertPkToPEM(pk *ecdsa.PrivateKey) ([]byte, error) {
+	bs, e := x509.MarshalECPrivateKey(pk)
+	if e != nil {
+		return nil, e
+	}
+	block := &pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: bs,
+	}
+	bs = pem.EncodeToMemory(block)
+	return bs, nil
 }

@@ -1,6 +1,14 @@
 package acme
 
-type AcmeDirectory struct {
+import (
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
+
+	"github.com/tonyzzp/acme/utils"
+)
+
+type Directory struct {
 	KeyChange   string
 	NewAccount  string
 	NewNonce    string
@@ -14,19 +22,12 @@ type AcmeDirectory struct {
 	}
 }
 
-type HeaderJWK struct {
-	Crv string `json:"crv"`
-	Kty string `json:"kty"`
-	X   string `json:"x"`
-	Y   string `json:"y"`
-}
-
 type Protected struct {
-	Alg   string     `json:"alg"`
-	Kid   string     `json:"kid,omitempty"`
-	Jwk   *HeaderJWK `json:"jwk,omitempty"`
-	Nonce string     `json:"nonce"`
-	Url   string     `json:"url"`
+	Alg   string          `json:"alg"`
+	Kid   string          `json:"kid,omitempty"`
+	Jwk   json.RawMessage `json:"jwk,omitempty"`
+	Nonce string          `json:"nonce"`
+	Url   string          `json:"url"`
 }
 
 type NewAccountPayload struct {
@@ -51,17 +52,27 @@ type NewOrderPayload struct {
 	NotAfter    string       `json:"notAfter"`
 }
 
-type AcmeAccount struct {
-	Kid       string
-	Key       JWK
-	Contact   []string
-	InitialIp string
-	CreatedAt string
-	Status    string
+type Account struct {
+	Uri                  string   `json:"uri"`
+	Contact              []string `json:"contact"`
+	InitialIp            string   `json:"initialIp"`
+	CreatedAt            string   `json:"createdAt"`
+	Status               string   `json:"status"`
+	TermsOfServiceAgreed bool     `json:"termsOfServiceAgreed"`
 }
 
+type OrderList struct {
+	Orders []string
+}
+
+const OrderStatusPending = "pending"
+const OrderStatusProcessing = "processing"
+const OrderStatusReady = "ready"
+const OrderStatusValid = "valid"
+const OrderStatusInvalid = "invalid"
+
 type Order struct {
-	Url            string
+	Uri            string
 	Status         string
 	Expires        string
 	NotBefore      string
@@ -71,6 +82,21 @@ type Order struct {
 	Finalize       string
 	Certificate    string
 	RetryAfter     int
+}
+
+type Cert struct {
+	Path          string
+	FullChainPEM  string
+	PrivateKeyPEM string
+	JWK           *JWK
+	Certs         []*x509.Certificate
+}
+
+func (order *Order) ShortDesc() string {
+	id := utils.Md5String([]byte(order.Uri))
+	id = id[:5]
+	identifier := order.Identifiers[0]
+	return fmt.Sprintf("%s %s %s %s", id, order.Status, identifier.Type, identifier.Value)
 }
 
 type Challenge struct {
@@ -89,11 +115,12 @@ type Challenge struct {
 	}
 }
 
-type OrderInfo struct {
-	Identifier Identifier
+type Authorization struct {
 	Status     string
 	Expires    string
+	Identifier Identifier
 	Challenges []Challenge
+	Wildcard   bool
 }
 
 type HttpRequestParam struct {
@@ -104,6 +131,6 @@ type HttpRequestParam struct {
 	Result  any
 }
 
-type CSRPayload struct {
+type FinalizePayload struct {
 	Csr string `json:"csr"`
 }

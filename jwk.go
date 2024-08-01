@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 )
 
 type JWK struct {
@@ -72,4 +74,17 @@ func NewECDSA() *JWK {
 		Alg: "ES256",
 	}
 	return jwk
+}
+
+func ReadJWKFromFile(file string) (*JWK, error) {
+	bs, e := os.ReadFile(file)
+	if e != nil {
+		return nil, e
+	}
+	rtn := &JWK{}
+	e = json.Unmarshal(bs, rtn)
+	if e != nil {
+		return nil, e
+	}
+	return rtn, e
 }
